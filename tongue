@@ -314,7 +314,7 @@ for index, arg in enumerate(sys.argv[1:]):
         print(list(words.keys()))
         print("total words: " + str(len(list(words.keys()))))
 
-    elif arg == "help":
+    elif arg == "--help" or arg == "-h" or arg == "help":
 
         # Output the help text
         print("tongue add <file>")
@@ -327,8 +327,6 @@ for index, arg in enumerate(sys.argv[1:]):
         print("  - see if the words you want are available")
         print("tongue say \"phrase you want to hear\"")
         print("  - make the subject speak those words")
-        print("tongue correct \"wrong\" \"right\"")
-        print("  - correct a subtitle")
 
     elif arg == "check":
 
