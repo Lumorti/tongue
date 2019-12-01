@@ -14,7 +14,7 @@ tongue --help
 tongue -h
 ```
 
-First have a folder containing mp3 or mp4 files, ideally only containg the voice you want to mimic.
+First have a folder containing mp3 or mp4 files, ideally only containing the voice you want to mimic.
 
 Then run:
 ```bash
@@ -33,7 +33,7 @@ tongue say "The phrase you want them to say"
 tongue say The phrase you want them to say
 ```
 
-To see if all the words for a phrase are available without doing the full speech generation, use any of:
+To quickly see if all the words for a phrase are available without doing the full speech generation, use any of:
 ```bash
 tongue check "The phrase you want to check"
 tongue check The phrase you want to check
