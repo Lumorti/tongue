@@ -1,0 +1,377 @@
+#!/usr/bin/python3
+import sys
+import os
+import subprocess
+import wave
+import autosub
+from pocketsphinx import Decoder, AudioFile, get_model_path, get_data_path
+import pyaudio
+import time
+import json
+from progressbar import ProgressBar, Percentage, Bar, ETA
+
+# Main array containing each possible word and its file/timing
+words = {}
+
+init_thresh = 1e-40
+repeat_times = 5
+repeat_multi = 100
+
+# Extract the data from a file for use here
+def generate(fileName):
+
+    # See if a subtitle file already exists
+    files = [f for f in os.listdir('.') if os.path.isfile(f)]
+    if fileName[:-4] + ".srt" in files:
+        print("Are you sure you want to re-add \"" + fileName + "\"? This can take a while. [y/n]")
+    else:
+        print("Are you sure you want to add \"" + fileName + "\"? This can take a while. [y/n]")
+
+    # Double check, since it takes a while
+    ans = input()
+    if ans == "y":
+
+        # Ensure the data is available as wav using ffmpeg
+        print("Converting to wav file")
+        # command = "ffmpeg -y -i " + fileName + " -ab 160k -ac 1 -ar 16000 -vn " + fileName[:-4] + ".wav" + " > /dev/null 2> /dev/null"
+        # subprocess.call(command, shell=True)
+
+        # Run autosub to generate a srt
+        sys.argv[0] = "autosub"
+        sys.argv[1] = fileName
+        sys.argv[2:] = ""
+        # autosub.main()
+
+        # Parse the generated srt file and split the phrases into words
+        parse_srt(fileName[:-4] + ".srt")
+
+        print("File added successfully")
+
+# Convert from "00:51:35,551" to milliseconds
+def convert_to_milli(string):
+
+    result = 0
+
+    result += int(string[0:2])*60*60*1000
+    result += int(string[3:5])*60*1000
+    result += int(string[6:8])*1000
+    result += int(string[9:12])
+
+    return result
+
+def load_json():
+
+    global words
+
+    files = [f for f in os.listdir('.') if os.path.isfile(f)]
+    for fileName in files:
+
+        if ".json" in fileName:
+            with open(fileName, "r") as jFile:
+
+                tempData = json.load(jFile)
+                for item in tempData:
+                    if item["phrase"] not in list(words.keys()):
+                        words[item["phrase"]] = item
+
+# Parse srt files
+def parse_srt(fileName):
+
+    jsonData = []
+
+    with open(fileName, "r") as inFile:
+
+        lines = inFile.readlines()
+
+        startMilli = 0
+        endMilli = 0
+        phrase = ""
+
+        dataFromThisFile = []
+
+        # Parse the srt file into phrases and start/end times
+        for i, line in enumerate(lines):
+
+            index = line.find("-->")
+            if index > 0:
+                startMilli = convert_to_milli(line[:index].strip())
+                endMilli = convert_to_milli(line[index+4:].strip())
+            elif line != "\n":
+                phrase = line.strip()
+
+            if line == "\n" or i == len(lines):
+                dataFromThisFile.append({"startMilli":startMilli,"endMilli":endMilli,"phrase":phrase})
+
+        widgets = ["Performing more detailed analysis: ", Percentage(), ' ', Bar(), ' ', ETA()]
+        pbar = ProgressBar(widgets=widgets, maxval=len(dataFromThisFile)).start()
+
+        # Go through the phrases
+        for index, phrase in enumerate(dataFromThisFile):
+
+            pbar.update(index)
+
+            # Write this phrase to the file temp.wav
+            with wave.open("temp.wav", "wb") as waveOut:
+
+                # Open this .wav file
+                with wave.open(fileName[:-4]+".wav", "rb") as waveIn:
+
+                    channels = waveIn.getnchannels()
+                    framerate = waveIn.getframerate()
+                    numframes = waveIn.getnframes()
+                    samplewidth = waveIn.getsampwidth()
+
+                    # Init the output file based on the frequency of the first input
+                    waveOut.setnchannels(channels)
+                    waveOut.setframerate(framerate)
+                    waveOut.setsampwidth(samplewidth)
+
+                    startPos = int(phrase["startMilli"] * (framerate / 1000))
+                    endPos = int(phrase["endMilli"] * (framerate / 1000))
+
+                    # Get the corresponding section
+                    waveIn.setpos(startPos)
+                    frames = waveIn.readframes(endPos-startPos)
+
+                    # Write this to the output file
+                    waveOut.writeframes(frames)
+
+            # Split the phrases into words
+            split = phrase["phrase"].lower().split()
+
+            # For each word in the phrase
+            for word in split:
+
+                # Use pocketsphinx to get the start and end positions of the word
+                thresh = init_thresh
+                for j in range(repeat_times):
+                    results = findWordInFile(word, "temp.wav", thresh)
+                    if len(results) <= 1:
+                        break
+                    thresh *= repeat_multi
+
+                # Only add words with certainly
+                if len(results) == 1:
+
+                    # Add the word to the json file data
+                    jsonData.append({"file": fileName[:-4]+".wav", "startMilli": phrase["startMilli"] + 1000.0*results[0][2], "endMilli": phrase["startMilli"] + 1000.0*results[0][3], "phrase": word})
+
+        pbar.finish()
+
+        # Write the json file
+        with open(fileName[:-4] + ".json", "w") as jFile:
+            json.dump(jsonData, jFile)
+
+def findWordInFile(word, fileName, thresh):
+
+    SAMPLE_RATE = 16000
+    CHUNK_SIZE = 4096
+
+    model_path = get_model_path()
+    
+    config = Decoder.default_config()
+    config.set_boolean('-verbose', False)
+    config.set_string('-hmm', os.path.join(model_path, 'en-us'))
+    config.set_string('-lm', os.path.join(model_path, 'en-us.lm.bin'))
+    config.set_string('-dict', os.path.join(model_path, 'cmudict-en-us.dict'))
+    config.set_string('-keyphrase', word)
+    config.set_boolean('-lm', False)
+    config.set_float('-kws_threshold', thresh)
+    config.set_string("-logfn", '/dev/null')
+
+    decoder = Decoder(config)
+    
+    wf = wave.open(fileName, 'rb');
+    
+    filesize = wf.getnframes()
+    data = wf.readframes(filesize)
+    
+    decoder.start_utt()
+    
+    index = 0
+    detected_times = 0
+
+    results = []
+    
+    while index < filesize:
+
+        if (index + CHUNK_SIZE) > filesize:
+            count = (filesize - index)
+        else:
+            count = CHUNK_SIZE
+        
+        temp_data = data[index:(index+count)]
+        
+        decoder.process_raw(temp_data, False, False)
+       
+        if decoder.hyp() != None:
+            
+            for seg in decoder.seg():
+                results.append([seg.word, seg.prob, seg.start_frame / 100.0, seg.end_frame / 100.0])
+
+            decoder.end_utt()
+            decoder.start_utt()
+        
+        index = index + count
+    
+    decoder.end_utt()
+
+    return results
+
+def say():
+
+    subprocess.call("cvlc output.wav --play-and-exit > /dev/null 2> /dev/null", shell=True)
+
+# Combine the sections of audio and save it to "output.wav"
+def save(text):
+
+    # Get the various words
+    split = text.split()
+
+    data = []
+    for word in split:
+        data.append(words[word])
+
+    # Open the output file
+    with wave.open("output.wav", "wb") as waveOut:
+
+        # For each word, write that slice to the output file
+        for i, word in enumerate(data):
+
+            # Open this .wav file
+            with wave.open(word["file"], "rb") as waveIn:
+
+                channels = waveIn.getnchannels()
+                framerate = waveIn.getframerate()
+                numframes = waveIn.getnframes()
+                samplewidth = waveIn.getsampwidth()
+
+                # Init the output file based on the frequency of the first input
+                if i == 0:
+                    waveOut.setnchannels(channels)
+                    waveOut.setframerate(framerate)
+                    waveOut.setsampwidth(samplewidth)
+
+                startPos = int(word["startMilli"] * (framerate / 1000))
+                endPos = int(word["endMilli"] * (framerate / 1000))
+
+                # Get the corresponding section
+                waveIn.setpos(startPos)
+                frames = waveIn.readframes(endPos-startPos)
+
+                # Write this to the output file
+                waveOut.writeframes(frames)
+
+# Ensure the words requested are available
+def check(text):
+
+    split = text.split()
+    succeeded = True
+
+    for word in split:
+
+        if word not in list(words.keys()):
+
+            print("error: the word \"" + word + "\" is not available") 
+            succeeded = False
+
+    return succeeded
+
+# Process command line arguments
+for index, arg in enumerate(sys.argv[1:]):
+
+    if arg == "add":
+        
+        # Make sure the arguments are given
+        if len(sys.argv[index+2]) <= 1:
+            print("use tongue help for usage")
+
+        # Generate the subtitle from a file
+        generate(sys.argv[index+2])
+
+    elif arg == "remove":
+
+        # Make sure the arguments are given
+        if len(sys.argv[index+2]) <= 1:
+            print("use tongue help for usage")
+
+        # Double check
+        fileName = sys.argv[index+2][:-4] + ".srt"
+        print("Are you sure you want to remove \"" + fileName + "\"? [y/n]")
+        ans = input()
+        if ans == "y":
+
+            # Remove the subtitle file
+            os.remove(fileName)
+
+    elif arg == "list":
+
+        # If the word array hasn't been initialised, do it now
+        load_json()
+
+        # Output the word info
+        print("words available:")
+        print(list(words.keys()))
+        print("total words: " + str(len(list(words.keys()))))
+
+    elif arg == "help":
+
+        # Output the help text
+        print("tongue add <file>")
+        print("  - generate subtitles for a file to allow that audio be used")
+        print("tongue remove <file>")
+        print("  - remove the subtitles for a file")
+        print("tongue list")
+        print("  - list the words available")
+        print("tongue check \"phrase you want to hear\"")
+        print("  - see if the words you want are available")
+        print("tongue say \"phrase you want to hear\"")
+        print("  - make the subject speak those words")
+        print("tongue correct \"wrong\" \"right\"")
+        print("  - correct a subtitle")
+
+    elif arg == "check":
+
+        # Make sure the arguments are given
+        if len(sys.argv) < 3:
+            print("use tongue help for usage")
+
+        # If the word array hasn't been initialised, do it now
+        load_json()
+
+        # Ensure all the words are available
+        string = " ".join(sys.argv[index+2:])
+        check(string)
+
+    elif arg == "say":
+
+        # Make sure the arguments are given
+        if len(sys.argv) < 3:
+            print("use tongue help for usage")
+
+        # If the word array hasn't been initialised, do it now
+        load_json()
+
+        # Ensure all the words are available first
+        string = " ".join(sys.argv[index+2:])
+        if check(string):
+
+            # Then speak the file
+            save(string)
+            say()
+
+    elif arg == "test":
+
+        results = findWordInFile("important", "output.wav")
+        print (results)
+
+    elif arg == "correct":
+
+        # Make sure the arguments are given
+        if len(sys.argv) < 4:
+            print("use tongue help for usage")
+
+        # Correct a subtitle
+        correct(sys.argv[index+2], sys.argv[index+3])
+
+
