@@ -3,6 +3,8 @@
 Tongue uses speech recognition to get the location of each individual word inside an audio or video file, then compiles these together in any order requested.
 This uses google speech recognition for the bulk processing, and then pocketsphinx to check individual words.
 
+This also includes "autosub", a Python script used to handle the google speech recognition. The license is included and the original is available [here](https://github.com/agermanidis/autosub).
+
 ### Usage
 
 To view the help for tongue use any of the following commands:
